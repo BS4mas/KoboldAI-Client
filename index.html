@@ -427,9 +427,10 @@ let waveActive = false;
 let spawnTimer = 0;
 const MAX_ZOMBIES = 25;
 
-// Zombies array
-let zombies = [];
+// Zombies - use Map with unique IDs to avoid index desync
+let zombieMap = new Map();
 let zombieMeshes = [];
+let nextZombieId = 0;
 
 // Map collision
 let wallBoxes = [];
@@ -740,14 +741,14 @@ function shoot() {
 
     if (hits.length > 0) {
         const hit = hits[0];
-        // Find which zombie was hit
+        // Find which zombie was hit via unique ID
         let hitMesh = hit.object;
-        while (hitMesh.parent && !hitMesh.userData.zombieIndex && hitMesh.userData.zombieIndex !== 0) {
+        while (hitMesh.parent && hitMesh.userData.zombieId === undefined) {
             hitMesh = hitMesh.parent;
         }
-        const idx = hitMesh.userData.zombieIndex;
-        if (idx !== undefined && zombies[idx]) {
-            damageZombie(idx, weapon.damage);
+        const zid = hitMesh.userData.zombieId;
+        if (zid !== undefined && zombieMap.has(zid)) {
+            damageZombie(zid, weapon.damage);
         }
         // Impact effect
         createImpactParticle(hit.point);
@@ -853,17 +854,17 @@ function createZombie() {
     const spawnPos = spawnPoints[Math.floor(Math.random() * spawnPoints.length)];
     group.position.copy(spawnPos);
 
-    const idx = zombies.length;
-    group.userData.zombieIndex = idx;
-    // Tag all children so raycast can find them
-    group.traverse((child) => { child.userData.zombieIndex = idx; });
+    const id = nextZombieId++;
+    group.userData.zombieId = id;
+    group.traverse((child) => { child.userData.zombieId = id; });
 
     scene.add(group);
     zombieMeshes.push(group);
 
     // Zombie data
     const waveMultiplier = 1 + (currentWave - 1) * 0.3;
-    zombies.push({
+    zombieMap.set(id, {
+        id: id,
         mesh: group,
         hp: 50 * waveMultiplier,
         maxHp: 50 * waveMultiplier,
@@ -883,13 +884,14 @@ function createZombie() {
     zombiesSpawned++;
 }
 
-function damageZombie(idx, damage) {
-    if (!zombies[idx] || !zombies[idx].alive) return;
-    zombies[idx].hp -= damage;
+function damageZombie(id, damage) {
+    const zombie = zombieMap.get(id);
+    if (!zombie || !zombie.alive) return;
+    zombie.hp -= damage;
     player.score += 10;
 
     // Flash red on hit
-    zombies[idx].mesh.traverse((child) => {
+    zombie.mesh.traverse((child) => {
         if (child.isMesh && child.material.color) {
             const origColor = child.material.color.getHex();
             child.material.color.setHex(0xff0000);
@@ -899,14 +901,15 @@ function damageZombie(idx, damage) {
         }
     });
 
-    if (zombies[idx].hp <= 0) {
-        killZombie(idx);
+    if (zombie.hp <= 0) {
+        killZombie(id);
     }
 }
 
-function killZombie(idx) {
-    if (!zombies[idx].alive) return;
-    zombies[idx].alive = false;
+function killZombie(id) {
+    const zombie = zombieMap.get(id);
+    if (!zombie || !zombie.alive) return;
+    zombie.alive = false;
     player.score += 100;
     player.kills++;
     zombiesRemaining--;
@@ -914,7 +917,7 @@ function killZombie(idx) {
     audio.zombieDeath();
 
     // Death animation - fall over
-    const mesh = zombies[idx].mesh;
+    const mesh = zombie.mesh;
     const fallAnim = { progress: 0 };
     const startY = mesh.position.y;
 
@@ -925,17 +928,18 @@ function killZombie(idx) {
         if (fallAnim.progress < 1) {
             requestAnimationFrame(animateFall);
         } else {
-            // Remove after delay
             setTimeout(() => {
                 scene.remove(mesh);
+                // Dispose geometry and materials
+                mesh.traverse((child) => {
+                    if (child.isMesh) {
+                        child.geometry.dispose();
+                        child.material.dispose();
+                    }
+                });
                 const mIdx = zombieMeshes.indexOf(mesh);
                 if (mIdx > -1) zombieMeshes.splice(mIdx, 1);
-                // Re-index remaining meshes
-                zombieMeshes.forEach((m, i) => {
-                    m.userData.zombieIndex = i;
-                    m.traverse((child) => { child.userData.zombieIndex = i; });
-                });
-                // Also reindex zombies array
+                zombieMap.delete(id);
             }, 2000);
         }
     }
@@ -953,7 +957,7 @@ function updateZombies(delta) {
     const playerPos = camera.position.clone();
     playerPos.y = 0;
 
-    zombies.forEach((zombie, idx) => {
+    zombieMap.forEach((zombie) => {
         if (!zombie.alive) return;
 
         const zombiePos = zombie.mesh.position.clone();
@@ -1245,10 +1249,19 @@ function restartGame() {
     isReloading = false;
     document.getElementById('reload-indicator').style.display = 'none';
 
-    // Remove all zombies
-    zombieMeshes.forEach(m => scene.remove(m));
-    zombies = [];
+    // Remove all zombies and dispose resources
+    zombieMeshes.forEach(m => {
+        scene.remove(m);
+        m.traverse((child) => {
+            if (child.isMesh) {
+                child.geometry.dispose();
+                child.material.dispose();
+            }
+        });
+    });
+    zombieMap.clear();
     zombieMeshes = [];
+    nextZombieId = 0;
 
     // Remove particles
     particles.forEach(p => {
